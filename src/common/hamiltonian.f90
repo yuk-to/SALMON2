@@ -164,9 +164,13 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
       else
       ! OpenMP parallelization: k-point & orbital indices
       
+#ifdef USE_OPENACC
+!$acc kernels loop private(im,ik,io,ispin,kAc,k_lap0,k_nabt) collapse(4) auto
+#else
 !$omp parallel do collapse(4) default(none) &
 !$omp          private(im,ik,io,ispin,kAc,k_lap0,k_nabt) &
 !$omp          shared(im_s,im_e,ik_s,ik_e,io_s,io_e,nspin,if_kac,system,stencil,mg,tpsi,htpsi,V_local)
+#endif
         do im=im_s,im_e
         do ik=ik_s,ik_e
         do io=io_s,io_e
@@ -181,14 +185,26 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
             k_lap0 = stencil%coef_lap0
             k_nabt = 0d0
           end if
+#ifdef USE_OPENACC
+          call zstencil_typical_seq_acc(mg%is_array,mg%ie_array,mg%is,mg%ie,mg%idx,mg%idy,mg%idz &
+		                    ,mg%is,mg%ie &
+                            ,tpsi%zwf(:,:,:,ispin,io,ik,im),htpsi%zwf(:,:,:,ispin,io,ik,im) &
+                            ,V_local(ispin)%f,k_lap0,stencil%coef_lap,k_nabt)
+#else
           call zstencil(mg%is_array,mg%ie_array,mg%is,mg%ie,mg%idx,mg%idy,mg%idz &
                             ,tpsi%zwf(:,:,:,ispin,io,ik,im),htpsi%zwf(:,:,:,ispin,io,ik,im) &
                             ,V_local(ispin)%f,k_lap0,stencil%coef_lap,k_nabt)
+#endif
         end do
         end do
         end do
         end do
+#ifdef USE_OPENACC
+!$acc end kernels
+#else
 !$omp end parallel do
+#endif
+
         
       end if
       
@@ -833,5 +849,116 @@ subroutine update_kvector_nonlocalpt_microAc(ik_s,ik_e,system,ppg)
 
   return
 end subroutine update_kvector_nonlocalpt_microAc
+
+subroutine zstencil_typical_seq_acc(is_array,ie_array,is,ie,idx,idy,idz,igs,ige &
+                               ,tpsi,htpsi,V_local,lap0,lapt,nabt &
+                               )
+!$acc routine seq
+  implicit none
+
+  integer,intent(in) :: is_array(3),ie_array(3),is(3),ie(3)
+  integer,intent(in) :: idx(is(1)-4:ie(1)+4),idy(is(2)-4:ie(2)+4),idz(is(3)-4:ie(3)+4)
+  integer,intent(in) :: igs(3),ige(3)
+
+  complex(8),intent(in)  :: tpsi   (is_array(1):ie_array(1),is_array(2):ie_array(2),is_array(3):ie_array(3))
+  complex(8),intent(out) :: htpsi  (is_array(1):ie_array(1),is_array(2):ie_array(2),is_array(3):ie_array(3))
+  real(8),   intent(in)  :: V_local(is(1):ie(1),is(2):ie(2),is(3):ie(3))
+  real(8),   intent(in)  :: lap0
+  real(8),   intent(in)  :: lapt(12), nabt(12)
+
+  complex(8), parameter :: zI=(0.d0,1.d0)
+
+  integer    :: ix,iy,iz
+  complex(8) :: v,w
+  complex(8) :: t(8)
+
+#ifdef __INTEL_COMPILER
+#if defined(__KNC__) || defined(__AVX512F__)
+#   define MEM_ALIGN   64
+#   define VECTOR_SIZE 4
+# else
+#   define MEM_ALIGN   32
+#   define VECTOR_SIZE 2
+# endif
+
+!dir$ assume_aligned V_local:MEM_ALIGN
+!dir$ assume_aligned tpsi   :MEM_ALIGN
+!dir$ assume_aligned htpsi  :MEM_ALIGN
+#endif
+
+#define DX(dt) idx(ix+(dt)),iy,iz
+#define DY(dt) ix,idy(iy+(dt)),iz
+#define DZ(dt) ix,iy,idz(iz+(dt))
+
+  do iz=igs(3),ige(3)
+  do iy=igs(2),ige(2)
+
+!dir$ assume_aligned V_local(is(1),iy,iz):MEM_ALIGN
+!dir$ assume_aligned tpsi(is_array(1),iy,iz)   :MEM_ALIGN
+!dir$ assume_aligned htpsi(is_array(1),iy,iz)  :MEM_ALIGN
+
+  do ix=igs(1),ige(1)
+    t(1) = tpsi(DX( 4))
+    t(2) = tpsi(DX( 3))
+    t(3) = tpsi(DX( 2))
+    t(4) = tpsi(DX( 1))
+    t(5) = tpsi(DX(-1))
+    t(6) = tpsi(DX(-2))
+    t(7) = tpsi(DX(-3))
+    t(8) = tpsi(DX(-4))
+
+    v=(lapt(1)*(t(4)+t(5)) &
+    & +lapt(2)*(t(3)+t(6)) &
+    & +lapt(3)*(t(2)+t(7)) &
+    & +lapt(4)*(t(1)+t(8)))
+    w=(nabt(1)*(t(4)-t(5)) &
+    & +nabt(2)*(t(3)-t(6)) &
+    & +nabt(3)*(t(2)-t(7)) &
+    & +nabt(4)*(t(1)-t(8)))
+
+    t(1) = tpsi(DY( 1))
+    t(2) = tpsi(DY( 2))
+    t(3) = tpsi(DY( 3))
+    t(4) = tpsi(DY( 4))
+    t(5) = tpsi(DY(-1))
+    t(6) = tpsi(DY(-2))
+    t(7) = tpsi(DY(-3))
+    t(8) = tpsi(DY(-4))
+
+    v=(lapt(5)*(t(1)+t(5)) &
+    & +lapt(6)*(t(2)+t(6)) &
+    & +lapt(7)*(t(3)+t(7)) &
+    & +lapt(8)*(t(4)+t(8))) + v
+    w=(nabt(5)*(t(1)-t(5)) &
+    & +nabt(6)*(t(2)-t(6)) &
+    & +nabt(7)*(t(3)-t(7)) &
+    & +nabt(8)*(t(4)-t(8))) + w
+
+    t(1) = tpsi(DZ( 1))
+    t(2) = tpsi(DZ( 2))
+    t(3) = tpsi(DZ( 3))
+    t(4) = tpsi(DZ( 4))
+    t(5) = tpsi(DZ(-1))
+    t(6) = tpsi(DZ(-2))
+    t(7) = tpsi(DZ(-3))
+    t(8) = tpsi(DZ(-4))
+
+    v=(lapt( 9)*(t(1)+t(5)) &
+    & +lapt(10)*(t(2)+t(6)) &
+    & +lapt(11)*(t(3)+t(7)) &
+    & +lapt(12)*(t(4)+t(8))) + v
+    w=(nabt( 9)*(t(1)-t(5)) &
+    & +nabt(10)*(t(2)-t(6)) &
+    & +nabt(11)*(t(3)-t(7)) &
+    & +nabt(12)*(t(4)-t(8))) + w
+
+    htpsi(ix,iy,iz) = V_local(ix,iy,iz)*tpsi(ix,iy,iz) &
+                    + lap0*tpsi(ix,iy,iz) &
+                    - 0.5d0 * v - zI * w
+  end do
+
+  end do
+  end do
+end subroutine
 
 end module hamiltonian
