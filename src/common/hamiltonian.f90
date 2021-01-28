@@ -345,10 +345,14 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
         end do
         !$omp end parallel do
       else
+#ifdef USE_OPENACC
+	    !$acc kernels loop private(im,ik,io,ispin,iz,iy,ix) collapse(6) auto
+#else
         !$omp parallel do collapse(6) default(none) &
         !$omp          private(im,ik,io,ispin,iz,iy,ix) &
         !$omp          shared(im_s,im_e,ik_s,ik_e,io_s,io_e,nspin,mg) &
         !$omp          shared(ttpsi,htpsi,V_local,tpsi)
+#endif
         do im=im_s,im_e
         do ik=ik_s,ik_e
         do io=io_s,io_e
@@ -365,7 +369,11 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
         end do
         end do
         end do
+#ifdef USE_OPENACC
+		!$acc end kernels
+#else
         !$omp end parallel do
+#endif
       end if
     end if
     call timer_end(LOG_UHPSI_SUBTRACTION)
