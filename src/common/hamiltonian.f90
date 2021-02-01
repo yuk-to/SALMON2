@@ -37,6 +37,10 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
   use code_optimization, only: stencil_is_parallelized_by_omp
   use communication, only: comm_summation
   implicit none
+
+  external :: zstencil_typical_seq
+  !$acc routine(zstencil_typical_seq) worker
+
   type(s_dft_system)      ,intent(in) :: system
   type(s_parallel_info),intent(in) :: info
   type(s_rgrid)  ,intent(in) :: mg
@@ -186,7 +190,7 @@ SUBROUTINE hpsi(tpsi,htpsi,info,mg,V_local,system,stencil,srg,ppg,ttpsi)
             k_nabt = 0d0
           end if
 #ifdef USE_OPENACC
-          call zstencil_typical_seq_acc(mg%is_array,mg%ie_array,mg%is,mg%ie,mg%idx,mg%idy,mg%idz &
+          call zstencil_typical_seq(mg%is_array,mg%ie_array,mg%is,mg%ie,mg%idx,mg%idy,mg%idz &
 		                    ,mg%is,mg%ie &
                             ,tpsi%zwf(:,:,:,ispin,io,ik,im),htpsi%zwf(:,:,:,ispin,io,ik,im) &
                             ,V_local(ispin)%f,k_lap0,stencil%coef_lap,k_nabt)
