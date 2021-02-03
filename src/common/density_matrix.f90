@@ -181,6 +181,7 @@ contains
     complex(8),allocatable :: uVpsibox (:,:,:,:,:)
     complex(8),allocatable :: uVpsibox2(:,:,:,:,:)
     complex(8),allocatable :: uVpsi(:)
+    real(8) :: jx,jy,jz
 
     call timer_begin(LOG_CURRENT_CALC)
 #ifdef FORTRAN_COMPILER_HAS_2MB_ALIGNED_ALLOCATION
@@ -211,6 +212,44 @@ contains
     do ispin=1,nspin
       call timer_begin(LOG_CURRENT_CALC)
       wrk4 = 0d0
+      jx = 0d0
+      jy = 0d0
+      jz = 0d0
+
+!$acc update device(system%vec_Ac)
+
+!$acc kernels present(system,info,mg,stencil,psi,ppg) copyin(BT,ispin,im) copy(jx,jy,jz)
+!$acc loop private(ik,io,kAc,wrk1,wrk2,wrk3,wrk4) reduction(+:jx,jy,jz) collapse(2) auto
+      do ik=info%ik_s,info%ik_e
+      do io=info%io_s,info%io_e
+
+        kAc(1:3) = system%vec_k(1:3,ik) + system%vec_Ac(1:3)
+        call stencil_current(mg%is_array,mg%ie_array,mg%is,mg%ie,mg%idx,mg%idy,mg%idz,stencil%coef_nab &
+                            ,kAc,psi%zwf(:,:,:,ispin,io,ik,im),wrk1,wrk2)
+!        wrk2 = matmul(BT,wrk2)
+        wrk3(1) = BT(1,1) * wrk2(1) + BT(1,2) * wrk2(2) + BT(1,3) * wrk2(3)
+        wrk3(2) = BT(2,1) * wrk2(1) + BT(2,2) * wrk2(2) + BT(2,3) * wrk2(3)
+        wrk3(3) = BT(3,1) * wrk2(1) + BT(3,2) * wrk2(2) + BT(3,3) * wrk2(3)
+        wrk2 = wrk3
+        #if 0
+        if(info%if_divide_rspace) then
+          uVpsi(:) = uVpsibox2(ispin,io,ik,im,:)
+          call calc_current_nonlocal_rdivided(wrk3,psi%zwf(:,:,:,ispin,io,ik,im),ppg,mg%is_array,mg%ie_array,ik,uVpsi)
+        else
+                #endif
+          call calc_current_nonlocal         (wrk3,psi%zwf(:,:,:,ispin,io,ik,im),ppg,mg%is_array,mg%ie_array,ik)
+!        end if
+
+        wrk4 = wrk4 + (wrk1 + wrk2 + wrk3) * system%rocc(io,ik,ispin)*system%wtk(ik)
+
+      end do
+      end do
+!$acc end kernels
+      wrk4(1) = jx
+      wrk4(2) = jy
+      wrk4(3) = jz
+
+#if 0
 !$omp parallel do collapse(2) default(none) &
 !$omp             private(ik,io,kAc,wrk1,wrk2,wrk3,uVpsi) &
 !$omp             shared(info,system,mg,stencil,ppg,psi,uVpsibox2,BT,im,ispin,yn_jm) &
@@ -250,6 +289,7 @@ contains
       end do
       end do
 !$omp end parallel do
+#endif
       call timer_end(LOG_CURRENT_CALC)
 
       call timer_begin(LOG_CURRENT_COMM_COLL)
@@ -271,6 +311,7 @@ contains
   contains
 
     subroutine stencil_current(is_array,ie_array,is,ie,idx,idy,idz,nabt,kAc,psi,j1,j2)
+!$acc routine worker
       integer   ,intent(in) :: is_array(3),ie_array(3),is(3),ie(3) &
                               ,idx(is(1)-Nd:ie(1)+Nd),idy(is(2)-Nd:ie(2)+Nd),idz(is(3)-Nd:ie(3)+Nd)
       real(8)   ,intent(in) :: nabt(Nd,3),kAc(3)
@@ -284,7 +325,8 @@ contains
       xtmp = 0d0
       ytmp = 0d0
       ztmp = 0d0
-!$omp parallel do collapse(2) private(iz,iy,ix,cpsi) reduction(+:rtmp,xtmp,ytmp,ztmp)
+!$acc loop worker collapse(2) private(iz,iy,ix,cpsi) reduction(+:rtmp,xtmp,ytmp,ztmp)
+!!$omp parallel do collapse(2) private(iz,iy,ix,cpsi) reduction(+:rtmp,xtmp,ytmp,ztmp)
       do iz=is(3),ie(3)
       do iy=is(2),ie(2)
 
@@ -322,7 +364,7 @@ contains
 
       end do
       end do
-!$omp end parallel do
+!!$omp end parallel do
       j1 = kAc(:) * rtmp
       j2(1) = aimag(xtmp * 2d0)
       j2(2) = aimag(ytmp * 2d0)
@@ -333,22 +375,31 @@ contains
   end subroutine calc_current
 
   subroutine calc_current_nonlocal(jw,psi,ppg,is_array,ie_array,ik)
+!$acc routine worker
     use structures
     implicit none
     integer   ,intent(in) :: is_array(3),ie_array(3),ik
     complex(8),intent(in) :: psi(is_array(1):ie_array(1),is_array(2):ie_array(2),is_array(3):ie_array(3))
     type(s_pp_grid),intent(in) :: ppg
     real(8)               :: jw(3)
+    real(8) :: jw1,jw2,jw3
     !
     integer    :: ilma,ia,j,ix,iy,iz
     real(8)    :: x,y,z
     complex(8) :: uVpsi,uVpsi_r(3)
-    jw = 0d0
-!$omp parallel do private(ilma,ia,uVpsi,uVpsi_r,j,x,y,z,ix,iy,iz) reduction(+:jw)
+!    jw = 0d0
+    jw1 = 0d0
+    jw2 = 0d0
+    jw3 = 0d0
+!$acc loop worker private(ilma,ia,uVpsi,uVpsi_r,j,x,y,z,ix,iy,iz) reduction(+:jw1,jw2,jw3)
+!!$omp parallel do private(ilma,ia,uVpsi,uVpsi_r,j,x,y,z,ix,iy,iz) reduction(+:jw)
     do ilma=1,ppg%Nlma
       ia=ppg%ia_tbl(ilma)
       uVpsi = 0d0
-      uVpsi_r = 0d0
+!      uVpsi_r = 0d0
+      uVpsi_r(1) = 0d0
+      uVpsi_r(2) = 0d0
+      uVpsi_r(3) = 0d0
       do j=1,ppg%Mps(ia)
         x = ppg%Rxyz(1,j,ia)
         y = ppg%Rxyz(2,j,ia)
@@ -362,9 +413,15 @@ contains
         uVpsi_r(3) = uVpsi_r(3) + conjg(ppg%zekr_uV(j,ilma,ik)) * z * psi(ix,iy,iz)
       end do
       uVpsi = uVpsi * ppg%rinv_uvu(ilma)
-      jw = jw + aimag(conjg(uVpsi_r)*uVpsi)
+!      jw = jw + aimag(conjg(uVpsi_r)*uVpsi)
+      jw1 = jw1 + aimag(conjg(uVpsi_r(1))*uVpsi)
+      jw2 = jw2 + aimag(conjg(uVpsi_r(2))*uVpsi)
+      jw3 = jw3 + aimag(conjg(uVpsi_r(3))*uVpsi)
     end do
-!$omp end parallel do
+!!$omp end parallel do
+    jw(1) = jw1
+    jw(2) = jw2
+    jw(3) = jw3
     jw = jw * 2d0
     return
   end subroutine calc_current_nonlocal
