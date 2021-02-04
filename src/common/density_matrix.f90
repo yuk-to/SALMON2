@@ -343,6 +343,9 @@ contains
 !        end if
 
         wrk4 = wrk4 + (wrk1 + wrk2 + wrk3) * system%rocc(io,ik,ispin)*system%wtk(ik)
+        jx = jx + wrk4(1)
+        jy = jy + wrk4(2)
+        jz = jz + wrk4(3)
 
       end do
       end do
